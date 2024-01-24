@@ -210,6 +210,11 @@ class DetachBin(filesDir: File, private val context: Context) {
     private val remote = "/data/adb/modules/zygisk-detach/detach.bin"
     var detached = listOf<String>()
 
+    fun deleteBin() {
+        File(internal).delete()
+        Shell.cmd("rm -f $remote").exec()
+    }
+
     fun getDetached(a: Int = 0): List<String> {
         File(internal).delete()
         if (Shell.cmd("cp -f $remote $internal").exec().code == 0) {
@@ -250,9 +255,11 @@ class DetachBin(filesDir: File, private val context: Context) {
         fileOutputStream.close()
         val r = Shell.cmd("cp -f $internal $remote").exec()
         if (r.code != 0) {
-            Toast.makeText(context, "ERROR", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "ERROR: make sure you flashed zygisk-detach", Toast.LENGTH_LONG)
+                .show()
+        } else {
+            Shell.cmd("am force-stop com.android.vending").exec()
         }
-        Shell.cmd("am force-stop com.android.vending").exec()
     }
 }
 
@@ -271,7 +278,13 @@ class MainActivity : ComponentActivity() {
                 it, packageManager.getApplicationLabel(it.applicationInfo).toString()
             )
         }.sortedBy { it.label }
-        val alDetach = detachBin.getDetached()
+        val alDetach = try {
+            detachBin.getDetached()
+        } catch (e: IndexOutOfBoundsException) {
+            detachBin.deleteBin()
+            listOf()
+        }
+
         apps.forEach { it.detached = alDetach.contains(it.pi.packageName) }
         apps = apps.sortedBy { it.label }.sortedBy { !it.detached }
         setContent {
