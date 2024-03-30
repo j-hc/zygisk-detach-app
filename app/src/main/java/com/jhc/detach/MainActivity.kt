@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.content.res.Resources
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -51,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalFocusManager
@@ -69,10 +73,12 @@ fun AppsList(
     packageManager: PackageManager,
     detachedApps: MutableState<List<DetachedApp>>,
     renderedApps: MutableState<List<DetachedApp>>,
-    detachBin: DetachBin
+    detachBin: DetachBin,
+    uninstalledAppBitmap: ImageBitmap
 ) {
+
     LazyColumn {
-        items(renderedApps.value, key = { it.pi.packageName }) { app ->
+        items(renderedApps.value, key = { it.packageName }) { app ->
             OutlinedCard(
                 modifier = Modifier.padding(3.dp)
             ) {
@@ -87,8 +93,9 @@ fun AppsList(
                             .fillMaxHeight(0.6f)
                             .padding(5.dp)
                             .padding(PaddingValues(start = 5.dp, end = 10.dp)),
-                        bitmap = packageManager.getApplicationIcon(app.pi.packageName).toBitmap()
-                            .asImageBitmap(),
+                        bitmap = if (app.installed) packageManager.getApplicationIcon(app.packageName)
+                            .toBitmap()
+                            .asImageBitmap() else uninstalledAppBitmap,
                         contentDescription = ""
                     )
                     Row(
@@ -100,7 +107,7 @@ fun AppsList(
                             Text(text = app.label, modifier = Modifier.wrapContentHeight())
                             Text(
                                 maxLines = 1,
-                                text = app.pi.packageName,
+                                text = app.packageName,
                                 fontSize = 14.sp,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
@@ -115,7 +122,7 @@ fun AppsList(
                                 app.detached = it
                                 detachBin.detached =
                                     detachedApps.value.filter { app -> app.detached }
-                                        .map { app -> app.pi.packageName }
+                                        .map { app -> app.packageName }
                             }, modifier = Modifier
                                 .wrapContentSize()
                                 .padding(
@@ -162,7 +169,7 @@ fun SearchBar(
             val searchText = it.lowercase()
             if (it.isNotEmpty()) {
                 renderedApps.value = detachedApps.value.filter { app ->
-                    app.pi.packageName.lowercase().contains(searchText) || app.label.lowercase()
+                    app.packageName.lowercase().contains(searchText) || app.label.lowercase()
                         .contains(searchText)
                 }
             }
@@ -202,7 +209,10 @@ fun AppsFilter(
 }
 
 data class DetachedApp(
-    val pi: PackageInfo, val label: String, var detached: Boolean = false
+    val packageName: String,
+    val label: String,
+    var detached: Boolean = false,
+    val installed: Boolean = true
 )
 
 class DetachBin(filesDir: File, private val context: Context) {
@@ -215,7 +225,7 @@ class DetachBin(filesDir: File, private val context: Context) {
         Shell.cmd("rm -f $remote").exec()
     }
 
-    fun getDetached(a: Int = 0): List<String> {
+    fun getDetached(dummy: Int = 0): List<String> {
         File(internal).delete()
         if (Shell.cmd("cp -f $remote $internal").exec().code == 0) {
             Shell.cmd("chmod 0777 $internal").exec()
@@ -275,21 +285,25 @@ class MainActivity : ComponentActivity() {
 
         var apps = packageManager.getInstalledPackages(0).map {
             DetachedApp(
-                it, packageManager.getApplicationLabel(it.applicationInfo).toString()
+                it.packageName, packageManager.getApplicationLabel(it.applicationInfo).toString()
             )
-        }.sortedBy { it.label }
+        }.sortedBy { it.label }.toMutableList()
         val alDetach = try {
             detachBin.getDetached()
         } catch (e: IndexOutOfBoundsException) {
             detachBin.deleteBin()
             listOf()
         }
-
-        apps.forEach { it.detached = alDetach.contains(it.pi.packageName) }
-        apps = apps.sortedBy { it.label }.sortedBy { !it.detached }
+        for (d in alDetach) {
+            if (apps.find { it.packageName == d } == null) {
+                apps.add(DetachedApp(d, d, detached = true, installed = false))
+            }
+        }
+        apps.forEach { it.detached = alDetach.contains(it.packageName) }
+        val appsFinal = apps.sortedBy { it.label }.sortedBy { !it.detached }.toList()
         setContent {
-            val detachedApps = remember { mutableStateOf(apps) }
-            val renderedApps = remember { mutableStateOf(apps) }
+            val detachedApps = remember { mutableStateOf(appsFinal) }
+            val renderedApps = remember { mutableStateOf(appsFinal) }
             ZygiskdetachTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background
@@ -318,7 +332,8 @@ class MainActivity : ComponentActivity() {
                                     packageManager = packageManager,
                                     detachedApps = detachedApps,
                                     renderedApps = renderedApps,
-                                    detachBin = detachBin
+                                    detachBin = detachBin,
+                                    getDrawable(R.mipmap.unistalled_app)!!.toBitmap().asImageBitmap()
                                 )
                             }
                         }
