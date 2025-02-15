@@ -1,0 +1,9 @@
+[versions]
+compiler = "4.16.0"
+
+[libraries]
+compiler = { module = "com.github.bumptech.glide:compiler", version.ref = "compiler" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+
