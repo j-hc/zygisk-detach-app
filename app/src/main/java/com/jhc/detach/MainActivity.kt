@@ -71,9 +71,7 @@ import java.io.FileOutputStream
 @Composable
 fun AppsList(
     packageManager: PackageManager,
-    detachedApps: MutableState<List<DetachedApp>>,
     renderedApps: MutableState<List<DetachedApp>>,
-    detachBin: DetachBin,
     uninstalledAppBitmap: ImageBitmap
 ) {
 
@@ -120,9 +118,6 @@ fun AppsList(
                             checked = checkedState.value, onCheckedChange = {
                                 checkedState.value = it
                                 app.detached = it
-                                detachBin.detached =
-                                    detachedApps.value.filter { app -> app.detached }
-                                        .map { app -> app.packageName }
                             }, modifier = Modifier
                                 .wrapContentSize()
                                 .padding(
@@ -215,83 +210,52 @@ data class DetachedApp(
     val installed: Boolean = true
 )
 
-class DetachBin(filesDir: File, private val context: Context) {
-    private val internal = filesDir.resolve("detach.bin").toString()
-    private val remote = "/data/adb/modules/zygisk-detach/detach.bin"
-    var detached = listOf<String>()
-
-    fun deleteBin() {
-        File(internal).delete()
-        Shell.cmd("rm -f $remote").exec()
-    }
-
-    fun getDetached(dummy: Int = 0): List<String> {
-        File(internal).delete()
-        if (Shell.cmd("cp -f $remote $internal").exec().code == 0) {
-            Shell.cmd("chmod 0777 $internal").exec()
-        }
-        val detachTxt = try {
-            context.openFileInput("detach.bin").readBytes()
-        } catch (_: Exception) {
-            return listOf()
-        }
-        var i = 0
-        val detached = mutableListOf<String>()
-        while (i < detachTxt.size) {
-            val len: Byte = detachTxt[i]
-            i += 1
-            val encodedName = detachTxt.sliceArray(i until i + len.toInt())
-            val name =
-                String(encodedName.filterIndexed { index, _ -> index % 2 == 0 }.toByteArray())
-            detached.add(name)
-            i += len.toInt()
-        }
-        return detached
-    }
-
-    fun binSerialize() {
-        val fileOutputStream = FileOutputStream(internal, false).buffered()
-        for (app in detached) {
-            val w = mutableListOf<Byte>()
-            for (b in app.substring(0, app.length - 1).toByteArray()) {
-                w.add(b)
-                w.add(0)
-            }
-            w.add(app.toByteArray()[app.length - 1])
-            fileOutputStream.write(byteArrayOf(w.size.toByte()))
-            fileOutputStream.write(w.toByteArray())
-        }
-        fileOutputStream.flush()
-        fileOutputStream.close()
-        val r = Shell.cmd("cp -f $internal $remote").exec()
-        if (r.code != 0) {
-            Toast.makeText(context, "ERROR: make sure you flashed zygisk-detach", Toast.LENGTH_LONG)
-                .show()
-        } else {
-            Shell.cmd("am force-stop com.android.vending").exec()
-        }
+class Toaster(private val context: Context) {
+    fun toast(msg: String, delay: Int = Toast.LENGTH_SHORT) {
+        Toast.makeText(context, msg, delay).show()
     }
 }
+
+fun runShell(cmd: String, toaster: Toaster): String {
+    val op = Shell.cmd(cmd).exec()
+    if (op.code != 0) {
+        toaster.toast("ERROR: " + op.getErr().joinToString("\n"), Toast.LENGTH_LONG)
+        return ""
+    } else {
+        return op.getOut().joinToString("\n")
+    }
+}
+
+fun String.splitn() =
+    if (isEmpty()) emptyList()
+    else this.split('\n')
 
 class MainActivity : ComponentActivity() {
     @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val toaster = Toaster(applicationContext)
         Shell.setDefaultBuilder(Shell.Builder.create().setFlags(Shell.FLAG_MOUNT_MASTER))
         if (!Shell.getShell().isRoot) {
-            Toast.makeText(applicationContext, "Not root!", Toast.LENGTH_LONG).show()
+            toaster.toast("Not root", Toast.LENGTH_SHORT)
+            finishAndRemoveTask()
+            return
         }
-        val detachBin = DetachBin(filesDir, applicationContext)
-
+        if (Shell.cmd("test -f /data/adb/modules/zygisk-detach/detach").exec().code != 0) {
+            toaster.toast("zygisk-detach is not installed", Toast.LENGTH_SHORT)
+            finishAndRemoveTask()
+            return
+        }
         var apps = packageManager.getInstalledPackages(0).map {
             DetachedApp(
                 it.packageName, packageManager.getApplicationLabel(it.applicationInfo).toString()
             )
         }.sortedBy { it.label }.toMutableList()
-        val alDetach = try {
-            detachBin.getDetached()
+        val alDetach: List<String> = try {
+            runShell("/data/adb/modules/zygisk-detach/detach list", toaster).splitn()
         } catch (e: IndexOutOfBoundsException) {
-            detachBin.deleteBin()
+            runShell("/data/adb/modules/zygisk-detach/detach reset", toaster)
             listOf()
         }
         for (d in alDetach) {
@@ -310,9 +274,16 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Scaffold(topBar = {}, floatingActionButton = {
                         FloatingActionButton(onClick = {
-                            detachBin.binSerialize()
-                            Toast.makeText(applicationContext, "Detached", Toast.LENGTH_SHORT)
-                                .show()
+                            val detachedList = detachedApps.value.filter { app -> app.detached }
+                                    .map { app -> app.packageName }
+                            if (detachedList.isEmpty()) {
+                                runShell("/data/adb/modules/zygisk-detach/detach reset", toaster)
+                                toaster.toast("Emptied the detach list")
+                            } else {
+                                val detachStr = detachedList.joinToString(" ")
+                                runShell("/data/adb/modules/zygisk-detach/detach detachall $detachStr", toaster)
+                                toaster.toast("Detached")
+                            }
                         }, modifier = Modifier) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
@@ -330,9 +301,7 @@ class MainActivity : ComponentActivity() {
                                 AppsFilter(detachedApps, renderedApps)
                                 AppsList(
                                     packageManager = packageManager,
-                                    detachedApps = detachedApps,
                                     renderedApps = renderedApps,
-                                    detachBin = detachBin,
                                     getDrawable(R.mipmap.unistalled_app)!!.toBitmap().asImageBitmap()
                                 )
                             }
